@@ -1,0 +1,168 @@
+#!/usr/bin/env bash
+# worker-chrome: one always-on, real Google Chrome per worker that agents drive instead of
+# Playwright's bundled headless Chromium. Headful on its own Xvfb screen, real GPU via Vulkan
+# when the box has one, a persistent logged-in profile, DevTools on 127.0.0.1 only.
+#
+#   worker-chrome setup        install the systemd user units and start it (idempotent)
+#   worker-chrome status       is it up, which Chrome, which GPU sites see
+#   worker-chrome endpoint     print the CDP URL (http://127.0.0.1:9230)
+#   worker-chrome display      print its X display (:90)
+#   worker-chrome node-path    print a NODE_PATH that resolves patchright-core
+#   worker-chrome view [stop]  VNC onto the screen to log in by hand (prefer `screenshare`)
+#   worker-chrome restart      restart Chrome (profile and logins survive)
+#   worker-chrome launch       what the systemd unit runs; not for interactive use
+#
+# Agents drive it with patchright-core (the Playwright API without the Runtime.enable leak),
+# which ships with this package: NODE_PATH=$(worker-chrome node-path). See the worker-chrome skill.
+# Settings, read at setup: WORKER_CHROME_DISPLAY (90), WORKER_CHROME_PORT (9230).
+set -euo pipefail
+
+DISPLAY_NUM=${WORKER_CHROME_DISPLAY:-90}   # away from :99, which screenshare uses on its own
+PORT=${WORKER_CHROME_PORT:-9230}
+VNC_PORT=5990
+PROFILE=$HOME/.browser-profiles/worker-chrome
+LIB=$HOME/.local/share/worker-chrome       # state: VNC password and log
+SELF=$(readlink -f "$0")
+PKG=$(dirname "$(dirname "$SELF")")
+UNITS=$HOME/.config/systemd/user
+CHROME=$(command -v google-chrome-stable || command -v google-chrome || true)
+
+die() { echo "worker-chrome: $*" >&2; exit 1; }
+
+launch() {
+  [ -n "$CHROME" ] || die "google-chrome-stable not installed"
+  local flags=(
+    --user-data-dir="$PROFILE"
+    --remote-debugging-port="$PORT"
+    --no-first-run --no-default-browser-check
+    --password-store=basic           # no keyring daemon here; avoids an unlock prompt nobody can see
+    --start-maximized
+  )
+  # Without this, Chrome on Xvfb has no WebGL at all, which is a loud bot signal.
+  # shellcheck disable=SC2054  # the commas are inside one flag's value
+  [ -e /dev/dri/renderD128 ] && flags+=(
+    --use-angle=vulkan --enable-features=Vulkan,DefaultANGLEVulkan,VulkanFromANGLE --ignore-gpu-blocklist
+  )
+  mkdir -p "$PROFILE"
+  # A crash leaves these behind and Chrome then refuses the profile.
+  rm -f "$PROFILE"/Singleton{Lock,Socket,Cookie}
+  exec "$CHROME" "${flags[@]}" about:blank
+}
+
+setup() {
+  [ "$(uname -s)" = Linux ] || die "workers only: needs Linux, systemd and Xvfb"
+  [ -n "$CHROME" ] || die "install Google Chrome first (google-chrome-stable)"
+  command -v Xvfb >/dev/null || die "install Xvfb (xorg-server-xvfb or xvfb)"
+  command -v openbox >/dev/null || die "install openbox"
+  mkdir -p "$UNITS" "$LIB" "$HOME/.local/bin"
+  # The unit runs this path, so it must survive the shell PATH and npm updates alike.
+  ln -sfn "$SELF" "$HOME/.local/bin/worker-chrome"
+
+  cat >"$UNITS/worker-chrome-screen.service" <<U
+[Unit]
+Description=worker-chrome screen :$DISPLAY_NUM (Xvfb + openbox)
+
+[Service]
+ExecStart=$(command -v Xvfb) :$DISPLAY_NUM -screen 0 1920x1080x24 -nolisten tcp
+ExecStartPost=/bin/sh -c 'for i in \$(seq 50); do [ -S /tmp/.X11-unix/X$DISPLAY_NUM ] && exit 0; sleep 0.1; done; exit 1'
+Restart=always
+
+[Install]
+WantedBy=default.target
+U
+  # openbox so Chrome gets a maximized window instead of a bare X root.
+  cat >"$UNITS/worker-chrome-wm.service" <<U
+[Unit]
+Description=openbox on worker-chrome screen :$DISPLAY_NUM
+BindsTo=worker-chrome-screen.service
+After=worker-chrome-screen.service
+
+[Service]
+Environment=DISPLAY=:$DISPLAY_NUM
+ExecStart=$(command -v openbox)
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=worker-chrome-screen.service
+U
+  cat >"$UNITS/worker-chrome.service" <<U
+[Unit]
+Description=worker-chrome: real Chrome on :$DISPLAY_NUM, CDP on 127.0.0.1:$PORT
+BindsTo=worker-chrome-screen.service
+After=worker-chrome-screen.service worker-chrome-wm.service
+
+[Service]
+Environment=DISPLAY=:$DISPLAY_NUM
+ExecStart=%h/.local/bin/worker-chrome launch
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=default.target
+U
+  # Installed from a git checkout instead of npm: fetch the one dependency next to the script.
+  [ -d "$(node_path)/patchright-core" ] || (cd "$PKG" && npm i --silent --omit=dev)
+  systemctl --user daemon-reload
+  systemctl --user enable --now worker-chrome-screen.service worker-chrome-wm.service worker-chrome.service
+  sleep 3; status
+}
+
+# Where patchright-core lives: inside this package once installed from npm (global installs nest
+# their dependencies), else a sibling node_modules when the package is itself a dependency.
+node_path() {
+  local d
+  for d in "$PKG/node_modules" "$(dirname "$PKG")"; do
+    [ -d "$d/patchright-core" ] && { echo "$d"; return 0; }
+  done
+  echo "$PKG/node_modules"
+}
+
+status() {
+  systemctl --user is-active --quiet worker-chrome.service || die "not running: systemctl --user status worker-chrome"
+  NODE_PATH=$(node_path) node -e '
+const { chromium } = require("patchright-core");
+(async () => {
+  const b = await chromium.connectOverCDP(process.argv[1]);
+  const p = await b.contexts()[0].newPage();
+  await p.goto("data:text/html,<p>");
+  const r = await p.evaluate(() => {
+    const c = document.createElement("canvas").getContext("webgl");
+    const e = c && c.getExtension("WEBGL_debug_renderer_info");
+    return { ua: navigator.userAgent, webdriver: navigator.webdriver, gl: e ? c.getParameter(e.UNMASKED_RENDERER_WEBGL) : "NO WEBGL" };
+  });
+  await p.close();
+  console.log(`up   ${process.argv[1]}  (display :'$DISPLAY_NUM')\nua   ${r.ua}\ngpu  ${r.gl}\nwebdriver ${r.webdriver}`);
+  process.exit(0);
+})().catch(e => { console.error(e.message); process.exit(1); });' "http://127.0.0.1:$PORT"
+}
+
+view() {
+  if [ "${1:-}" = stop ]; then pkill -u "$(id -u)" -f "x0vncserver.*:$DISPLAY_NUM" && echo "VNC stopped"; return 0; fi
+  command -v x0vncserver >/dev/null || die "install tigervnc"
+  local pwf=$LIB/vncpasswd ip
+  [ -s "$pwf" ] || cat "$HOME/.screenshare/password" 2>/dev/null | vncpasswd -f >"$pwf" 2>/dev/null \
+    || die "write a VNC password: vncpasswd $pwf"
+  chmod 600 "$pwf"
+  ip=$(tailscale ip -4 2>/dev/null | head -1) || true
+  [ -n "$ip" ] || die "no tailscale IP; refusing to expose VNC on other interfaces"
+  pkill -u "$(id -u)" -f "x0vncserver.*:$DISPLAY_NUM" || true
+  setsid x0vncserver -display :$DISPLAY_NUM -rfbport $VNC_PORT -interface "$ip" -PasswordFile "$pwf" \
+    >"$LIB/vnc.log" 2>&1 </dev/null &
+  sleep 1
+  echo "open vnc://$(hostname):$VNC_PORT   (password: same as screenshare). Stop with: worker-chrome view stop"
+  echo "smoother: run 'screenshare' on your laptop; it opens this same screen over RustDesk"
+}
+
+case "${1:-status}" in
+  launch)   launch ;;
+  setup)    setup ;;
+  status)   status ;;
+  endpoint) echo "http://127.0.0.1:$PORT" ;;
+  display)  echo ":$DISPLAY_NUM" ;;
+  node-path) node_path ;;
+  view)     shift; view "$@" ;;
+  restart)  systemctl --user restart worker-chrome.service; sleep 3; status ;;
+  -h|--help|help) sed -n '2,17p' "$SELF" | sed 's/^# \{0,1\}//' ;;
+  *) sed -n '2,17p' "$SELF" | sed 's/^# \{0,1\}//'; exit 2 ;;
+esac
