@@ -12,7 +12,12 @@ the box's real GPU, keeps one persistent profile you log into by hand, and expos
 npm i -g worker-chrome
 worker-chrome setup      # systemd user units for Xvfb :90, openbox and Chrome; starts them
 worker-chrome status     # endpoint, Chrome's user agent, the GPU sites see, webdriver=false
+worker-chrome browsers   # every Chrome on the box, by label, with its screen, port and tabs
+worker-chrome describe <name> "what it is for"   # shown by browsers
 ```
+
+Its window is titled `<host> · worker-chrome`. Give any other Chrome on the box a label the same
+way, `--window-name="<host> · <name>"`, and `worker-chrome browsers` lists it by that name.
 
 ## Drive it
 

@@ -30,6 +30,29 @@ worker-chrome status     # endpoint, Chrome version, the GPU sites see
 If it is down: `systemctl --user restart worker-chrome`. A missing command means the worker was
 never set up: `npm i -g worker-chrome && worker-chrome setup`.
 
+## Which Chrome is which
+
+Every Chrome on a worker is labeled in its window title as `<host> · <name>`. This one is
+`<host> · worker-chrome`. To see them all:
+
+```bash
+worker-chrome browsers   # each Chrome: label, screen, DevTools port, unit, profile, open tabs
+```
+
+Run it before driving any browser you did not start, and to find which one owns a tab. If a task
+really needs its own Chrome (a separate profile, a bot, a clean logged-out session), label it
+with `--window-name="$(hostname -s) · <name>"`, and in Playwright
+`chromium.launch({ args: ["--window-name=<host> · <name>"] })`. An unlabeled Chrome shows up
+under its profile directory's name.
+
+Say what a Chrome is for, and `browsers` prints it next to the label. Descriptions live in
+`~/.local/share/worker-chrome/descriptions.json`, keyed by name:
+
+```bash
+worker-chrome describe my-task "Scrapes X for the Y report, closes when done"
+worker-chrome describe my-task      # no text removes it
+```
+
 ## Drive it
 
 Use `patchright-core`. It has the same API as `playwright-core`, but it does not send the CDP
