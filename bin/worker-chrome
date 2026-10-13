@@ -10,10 +10,13 @@
 #   worker-chrome node-path    print a NODE_PATH that resolves patchright-core
 #   worker-chrome view [stop]  VNC onto the screen to log in by hand (prefer `screenshare`)
 #   worker-chrome restart      restart Chrome (profile and logins survive)
+#   worker-chrome browsers     every Chrome on this box: label, screen, port, unit, profile, tabs
 #   worker-chrome launch       what the systemd unit runs; not for interactive use
 #
 # Agents drive it with patchright-core (the Playwright API without the Runtime.enable leak),
 # which ships with this package: NODE_PATH=$(worker-chrome node-path). See the worker-chrome skill.
+# Its window is titled "<host> · worker-chrome". Label any other Chrome the same way with
+# --window-name="<host> · <name>" so screenshare, VNC and `worker-chrome browsers` tell them apart.
 # Settings, read at setup: WORKER_CHROME_DISPLAY (90), WORKER_CHROME_PORT (9230).
 set -euo pipefail
 
@@ -37,6 +40,7 @@ launch() {
     --no-first-run --no-default-browser-check
     --password-store=basic           # no keyring daemon here; avoids an unlock prompt nobody can see
     --start-maximized
+    --window-name="$(hostname -s) · worker-chrome"
   )
   # Without this, Chrome on Xvfb has no WebGL at all, which is a loud bot signal.
   # shellcheck disable=SC2054  # the commas are inside one flag's value
@@ -163,6 +167,7 @@ case "${1:-status}" in
   node-path) node_path ;;
   view)     shift; view "$@" ;;
   restart)  systemctl --user restart worker-chrome.service; sleep 3; status ;;
-  -h|--help|help) sed -n '2,17p' "$SELF" | sed 's/^# \{0,1\}//' ;;
-  *) sed -n '2,17p' "$SELF" | sed 's/^# \{0,1\}//'; exit 2 ;;
+  browsers) node "$PKG/bin/browsers.mjs" ;;
+  -h|--help|help) sed -n '2,20p' "$SELF" | sed 's/^# \{0,1\}//' ;;
+  *) sed -n '2,20p' "$SELF" | sed 's/^# \{0,1\}//'; exit 2 ;;
 esac

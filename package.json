@@ -1,6 +1,6 @@
 {
   "name": "worker-chrome",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "One always-on, real, logged-in Google Chrome on a headless Linux box for AI agents to drive. Real GPU, persistent profile, no headless or webdriver tells.",
   "license": "MIT",
   "author": "Aryan Saini",
