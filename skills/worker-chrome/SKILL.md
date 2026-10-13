@@ -45,6 +45,14 @@ with `--window-name="$(hostname -s) · <name>"`, and in Playwright
 `chromium.launch({ args: ["--window-name=<host> · <name>"] })`. An unlabeled Chrome shows up
 under its profile directory's name.
 
+Say what a Chrome is for, and `browsers` prints it next to the label. Descriptions live in
+`~/.local/share/worker-chrome/descriptions.json`, keyed by name:
+
+```bash
+worker-chrome describe my-task "Scrapes X for the Y report, closes when done"
+worker-chrome describe my-task      # no text removes it
+```
+
 ## Drive it
 
 Use `patchright-core`. It has the same API as `playwright-core`, but it does not send the CDP

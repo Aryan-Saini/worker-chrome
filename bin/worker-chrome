@@ -10,7 +10,8 @@
 #   worker-chrome node-path    print a NODE_PATH that resolves patchright-core
 #   worker-chrome view [stop]  VNC onto the screen to log in by hand (prefer `screenshare`)
 #   worker-chrome restart      restart Chrome (profile and logins survive)
-#   worker-chrome browsers     every Chrome on this box: label, screen, port, unit, profile, tabs
+#   worker-chrome browsers     every Chrome on this box: label, description, screen, port, profile, tabs
+#   worker-chrome describe <name> "<text>"  save what a Chrome is for (no text removes it)
 #   worker-chrome launch       what the systemd unit runs; not for interactive use
 #
 # Agents drive it with patchright-core (the Playwright API without the Runtime.enable leak),
@@ -168,6 +169,7 @@ case "${1:-status}" in
   view)     shift; view "$@" ;;
   restart)  systemctl --user restart worker-chrome.service; sleep 3; status ;;
   browsers) node "$PKG/bin/browsers.mjs" ;;
-  -h|--help|help) sed -n '2,20p' "$SELF" | sed 's/^# \{0,1\}//' ;;
-  *) sed -n '2,20p' "$SELF" | sed 's/^# \{0,1\}//'; exit 2 ;;
+  describe) shift; node "$PKG/bin/browsers.mjs" describe "$@" ;;
+  -h|--help|help) sed -n '2,21p' "$SELF" | sed 's/^# \{0,1\}//' ;;
+  *) sed -n '2,21p' "$SELF" | sed 's/^# \{0,1\}//'; exit 2 ;;
 esac
