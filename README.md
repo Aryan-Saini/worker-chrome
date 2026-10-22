@@ -36,6 +36,23 @@ await p.close(); await b.close();            // close disconnects; Chrome keeps 
 
 The `chrome-devtools` MCP works too: `--browser-url=http://127.0.0.1:9230`.
 
+## From your laptop
+
+DevTools stays on `127.0.0.1`. To drive this Chrome from another machine on a private network
+such as Tailscale, serve the port on that one address, to the machines you name:
+
+```bash
+worker-chrome expose 100.64.0.5 100.64.0.9      # bind address, then allowed source IPs or CIDRs
+worker-chrome endpoint --remote                 # http://100.64.0.5:9230, for the allowed machines
+worker-chrome expose off
+```
+
+A small relay unit (`worker-chrome-expose.service`) does it, so Chrome never restarts and never
+listens beyond loopback. It refuses `0.0.0.0` and `::`, drops any source not on the list, and
+keeps its addresses in `~/.config/worker-chrome/expose`. Connect with the IP, not a hostname:
+Chrome rejects DevTools requests whose `Host` is a name. Without `expose`, an SSH tunnel works:
+`ssh -N -L 9230:127.0.0.1:9230 <box>`.
+
 `skills/worker-chrome/SKILL.md` is the agent skill: open your own tab, never a new context, never
 log out or clear data. Link it into your harness:
 

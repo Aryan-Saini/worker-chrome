@@ -6,19 +6,24 @@
 #   worker-chrome setup        install the systemd user units and start it (idempotent)
 #   worker-chrome status       is it up, which Chrome, which GPU sites see
 #   worker-chrome endpoint     print the CDP URL (http://127.0.0.1:9230)
+#   worker-chrome endpoint --remote   the CDP URL for allowed machines (see expose)
 #   worker-chrome display      print its X display (:90)
 #   worker-chrome node-path    print a NODE_PATH that resolves patchright-core
 #   worker-chrome view [stop]  VNC onto the screen to log in by hand (prefer `screenshare`)
 #   worker-chrome restart      restart Chrome (profile and logins survive)
 #   worker-chrome browsers     every Chrome on this box: label, description, screen, port, profile, tabs
 #   worker-chrome describe <name> "<text>"  save what a Chrome is for (no text removes it)
-#   worker-chrome launch       what the systemd unit runs; not for interactive use
+#   worker-chrome expose <addr> <allowed>  also serve CDP on <addr> (e.g. the Tailscale IP) to
+#                              the allowed source IPs/CIDRs only; comma separated lists
+#   worker-chrome expose [off] show it, or stop serving it
+#   worker-chrome launch|forward  what the systemd units run; not for interactive use
 #
 # Agents drive it with patchright-core (the Playwright API without the Runtime.enable leak),
 # which ships with this package: NODE_PATH=$(worker-chrome node-path). See the worker-chrome skill.
 # Its window is titled "<host> · worker-chrome". Label any other Chrome the same way with
 # --window-name="<host> · <name>" so screenshare, VNC and `worker-chrome browsers` tell them apart.
 # Settings, read at setup: WORKER_CHROME_DISPLAY (90), WORKER_CHROME_PORT (9230).
+# expose keeps its addresses in ~/.config/worker-chrome/expose; it never binds 0.0.0.0 or ::.
 set -euo pipefail
 
 DISPLAY_NUM=${WORKER_CHROME_DISPLAY:-90}   # away from :99, which screenshare uses on its own
@@ -29,6 +34,7 @@ LIB=$HOME/.local/share/worker-chrome       # state: VNC password and log
 SELF=$(readlink -f "$0")
 PKG=$(dirname "$(dirname "$SELF")")
 UNITS=$HOME/.config/systemd/user
+EXPOSE_CONF=$HOME/.config/worker-chrome/expose
 CHROME=$(command -v google-chrome-stable || command -v google-chrome || true)
 
 die() { echo "worker-chrome: $*" >&2; exit 1; }
@@ -108,6 +114,7 @@ WantedBy=default.target
 U
   # Installed from a git checkout instead of npm: fetch the one dependency next to the script.
   [ -d "$(node_path)/patchright-core" ] || (cd "$PKG" && npm i --silent --omit=dev)
+  [ -s "$EXPOSE_CONF" ] && expose_unit
   systemctl --user daemon-reload
   systemctl --user enable --now worker-chrome-screen.service worker-chrome-wm.service worker-chrome.service
   sleep 3; status
@@ -140,6 +147,7 @@ const { chromium } = require("patchright-core");
   console.log(`up   ${process.argv[1]}  (display :'$DISPLAY_NUM')\nua   ${r.ua}\ngpu  ${r.gl}\nwebdriver ${r.webdriver}`);
   process.exit(0);
 })().catch(e => { console.error(e.message); process.exit(1); });' "http://127.0.0.1:$PORT"
+  [ ! -s "$EXPOSE_CONF" ] || echo "remote $(expose_show)"
 }
 
 view() {
@@ -159,17 +167,95 @@ view() {
   echo "smoother: run 'screenshare' on your laptop; it opens this same screen over RustDesk"
 }
 
+# expose: a node TCP relay (bin/forward.mjs) in its own unit, so Chrome itself never listens
+# beyond 127.0.0.1 and turning it on or off never restarts Chrome. The config is two lines,
+# bind=<ips> and allow=<ips/cidrs>, kept out of the unit so setup can rewrite units freely.
+expose_get() { sed -n "s/^$1=//p" "$EXPOSE_CONF" 2>/dev/null; }
+
+# Chrome only answers DevTools HTTP requests whose Host is an IP or localhost, and it builds the
+# websocket URL from that Host. So remote clients must use the IP, never a hostname.
+remote_url() {
+  local ip
+  ip=$(expose_get bind | tr ', ' '\n\n' | grep -m1 .) || return 1
+  case $ip in *:*) ip="[$ip]" ;; esac
+  echo "http://$ip:$PORT"
+}
+
+expose_unit() {
+  cat >"$UNITS/worker-chrome-expose.service" <<U
+[Unit]
+Description=worker-chrome: DevTools port $PORT on the addresses in $EXPOSE_CONF, allowlisted
+After=worker-chrome.service
+
+[Service]
+Environment=PATH=$(dirname "$(command -v node)"):/usr/bin:/bin
+ExecStart=%h/.local/bin/worker-chrome forward
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+U
+}
+
+expose_show() {
+  [ -s "$EXPOSE_CONF" ] || { echo "not exposed: CDP is on 127.0.0.1:$PORT only"; return 0; }
+  echo "$(remote_url)  on $(expose_get bind)  from $(expose_get allow) and loopback  ($(systemctl --user is-active worker-chrome-expose.service || true))"
+}
+
+expose() {
+  case "${1:-}" in
+    "") expose_show ;;
+    off)
+      systemctl --user disable --now worker-chrome-expose.service 2>/dev/null || true
+      rm -f "$EXPOSE_CONF" "$UNITS/worker-chrome-expose.service"
+      systemctl --user daemon-reload
+      expose_show ;;
+    *)
+      [ $# -ge 2 ] || die 'usage: worker-chrome expose <addr>[,<addr>] <allowed ip or cidr>[,...]'
+      local bind=$1; shift
+      node "$PKG/bin/forward.mjs" check "$PORT" "$bind" "$*" || exit 1
+      mkdir -p "$(dirname "$EXPOSE_CONF")" "$UNITS" "$HOME/.local/bin"
+      ln -sfn "$SELF" "$HOME/.local/bin/worker-chrome"
+      printf 'bind=%s\nallow=%s\n' "$bind" "$(echo "$*" | tr ' ' ',')" >"$EXPOSE_CONF"
+      expose_unit
+      systemctl --user daemon-reload
+      systemctl --user enable --quiet worker-chrome-expose.service
+      systemctl --user restart worker-chrome-expose.service
+      sleep 1
+      systemctl --user is-active --quiet worker-chrome-expose.service \
+        || die "forwarder failed: journalctl --user -u worker-chrome-expose"
+      expose_show ;;
+  esac
+}
+
+forward() {
+  [ -s "$EXPOSE_CONF" ] || die "nothing to expose: worker-chrome expose <addr> <allowed>"
+  exec node "$PKG/bin/forward.mjs" serve "$PORT" "$(expose_get bind)" "$(expose_get allow)"
+}
+
+endpoint() {
+  [ "${1:-}" = --remote ] || { echo "http://127.0.0.1:$PORT"; return 0; }
+  remote_url && return 0
+  echo "worker-chrome: CDP is not exposed beyond this box. Either run 'worker-chrome expose' here," >&2
+  echo "or tunnel from the other machine and use http://127.0.0.1:$PORT there:" >&2
+  echo "  ssh -N -L $PORT:127.0.0.1:$PORT $(hostname -s)" >&2
+  exit 1
+}
+
 case "${1:-status}" in
   launch)   launch ;;
   setup)    setup ;;
   status)   status ;;
-  endpoint) echo "http://127.0.0.1:$PORT" ;;
+  endpoint) shift; endpoint "$@" ;;
   display)  echo ":$DISPLAY_NUM" ;;
   node-path) node_path ;;
   view)     shift; view "$@" ;;
   restart)  systemctl --user restart worker-chrome.service; sleep 3; status ;;
   browsers) node "$PKG/bin/browsers.mjs" ;;
   describe) shift; node "$PKG/bin/browsers.mjs" describe "$@" ;;
-  -h|--help|help) sed -n '2,21p' "$SELF" | sed 's/^# \{0,1\}//' ;;
-  *) sed -n '2,21p' "$SELF" | sed 's/^# \{0,1\}//'; exit 2 ;;
+  expose)   shift; expose "$@" ;;
+  forward)  forward ;;
+  -h|--help|help) sed -n '2,26p' "$SELF" | sed 's/^# \{0,1\}//' ;;
+  *) sed -n '2,26p' "$SELF" | sed 's/^# \{0,1\}//'; exit 2 ;;
 esac

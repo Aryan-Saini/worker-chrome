@@ -91,6 +91,15 @@ The rules, all because this browser is shared and logged in as the user:
 The usual Playwright API works: `getByRole`, `getByLabel`, `waitForURL`, `locator().innerText()`,
 `p.on("console")`, `p.on("requestfailed")`. Wait for the thing you mean, not `waitForTimeout`.
 
+- **Never `waitUntil: "networkidle"`.** Real sites poll, stream and run analytics, so it often
+  never settles and `page.goto` times out after 30s. Use `"domcontentloaded"`, then wait for a
+  locator you need.
+- **`NODE_PATH` only works with `require`.** It is ignored by ESM `import`, so a `.mjs` file or
+  `"type": "module"` script fails with `ERR_MODULE_NOT_FOUND: patchright-core`. Use `node -e`,
+  a `.cjs`/`.js` file with `require`, or in ESM:
+  `const { chromium } = createRequire(process.env.NODE_PATH + "/")("patchright-core")`
+  (`import { createRequire } from "node:module"`).
+
 ## When a site needs a login
 
 If the profile is not logged in to the site, stop and tell the user. Never type their
@@ -104,6 +113,30 @@ screenshare https://site/login   # on the laptop: opens this Chrome over RustDes
 login done there is the login you use. Without it, `worker-chrome view` serves the same screen
 over VNC on the Tailscale IP (`worker-chrome view stop` after). Logins stay in the profile across
 restarts.
+
+## From another machine (a laptop)
+
+The DevTools port is `127.0.0.1:9230` on the worker. Ask the worker for the URL to use:
+
+```bash
+ssh <worker> worker-chrome endpoint --remote   # e.g. http://100.x.y.z:9230
+```
+
+If it prints a URL, the worker serves CDP on that address to an allowlist of machines (set up
+with `worker-chrome expose`). Use it as is in `connectOverCDP(url)`, `--cdp-endpoint` or
+`--browser-url`. Keep the IP: Chrome rejects DevTools requests whose Host is a hostname, so
+`http://<worker-name>:9230` fails even though the name resolves.
+
+If it fails instead, tunnel, and use `http://127.0.0.1:9230` locally:
+
+```bash
+ssh -f -N -o ExitOnForwardFailure=yes -L 9230:127.0.0.1:9230 <worker>
+```
+
+The port is 9230. Other Chromes on the worker (9222 and so on) are different browsers with
+different logins; `worker-chrome browsers` on the worker lists them. The laptop has no
+`worker-chrome node-path`: use its own `patchright-core` or `playwright-core`. The tab rules
+above apply the same from anywhere.
 
 ## MCP
 
